@@ -35,6 +35,10 @@ import { registerMemoryTdaiCli } from "./src/cli/index.js";
 import { initDataDirectories, resetStores } from "./src/utils/pipeline-factory.js";
 import { getOrCreateInstanceId, initReporter, report, resetReporter } from "./src/core/report/reporter.js";
 import { ensureL2L3Local } from "./src/core/profile/profile-sync.js";
+import {
+  prepareMessagesForPromptCache,
+  type PromptCacheMessage,
+} from "./src/utils/memory-injection-cache.js";
 
 // Core abstractions (host-neutral)
 import { OpenClawHostAdapter } from "./src/adapters/openclaw/host-adapter.js";
@@ -545,11 +549,23 @@ export default function register(api: OpenClawPluginApi) {
 
       // Cache original user prompt for agent_end
       const rawPrompt = event.prompt;
-      const messages = Array.isArray(event.messages) ? event.messages : undefined;
+      const messages = Array.isArray(event.messages) ? (event.messages as PromptCacheMessage[]) : undefined;
       if (sessionKey && rawPrompt) {
         const messageCount = messages?.length ?? 0;
         pendingOriginalPrompts.set(sessionKey, { text: rawPrompt, ts: Date.now(), messageCount });
         api.logger.debug?.(`${TAG} [before_prompt_build] Cached original prompt (${rawPrompt.length} chars, msgCount=${messageCount})`);
+      }
+      if (messages) {
+        const prepared = prepareMessagesForPromptCache(messages);
+        if (prepared.compacted.messagesChanged > 0) {
+          (event as { messages?: unknown }).messages = prepared.messages;
+          api.logger.debug?.(
+            `${TAG} [before_prompt_build] Compacted injected recall history: ` +
+            `compactedMessages=${prepared.compacted.messagesChanged}, ` +
+            `textParts=${prepared.compacted.textPartsChanged}, ` +
+            `removedChars=${prepared.compacted.removedChars}`,
+          );
+        }
       }
       sweepStaleCaches();
 
