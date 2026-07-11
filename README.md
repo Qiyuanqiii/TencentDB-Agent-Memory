@@ -509,6 +509,7 @@ Debugging no longer means probing an opaque database — it becomes a determinis
 | [`CHANGELOG.md`](./CHANGELOG.md) | Release notes and version history |
 | [`openclaw.plugin.json`](./openclaw.plugin.json) | OpenClaw plugin manifest and configuration schema |
 | [`src/adapters/gateway-client/README.md`](./src/adapters/gateway-client/README.md) | Gateway-based adapter guide for Codex, Claude Code, Dify, LangGraph, and custom agents |
+| [`docs/DIFY-ADAPTER.md`](./docs/DIFY-ADAPTER.md) | Dify workflow adapter guide built on the Gateway adapter kit |
 
 ---
 

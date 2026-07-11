@@ -31,3 +31,13 @@ export type {
   GatewayPlatformAdapterOptions,
   GatewayPlatformContext,
 } from "./gateway-client/index.js";
+
+// Dify Workflow adapter
+export { DifyWorkflowMemoryAdapter, createDifyWorkflowMemoryAdapter } from "./dify/index.js";
+export type {
+  DifyCaptureResult,
+  DifyGatewayMemoryPort,
+  DifyRecallResult,
+  DifyWorkflowInput,
+  DifyWorkflowMemoryAdapterOptions,
+} from "./dify/index.js";

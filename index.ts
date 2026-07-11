@@ -46,16 +46,23 @@ import {
 import { resolveOpenClawStateDir } from "./src/utils/openclaw-state-dir.js";
 
 export {
+  DifyWorkflowMemoryAdapter,
   GatewayMemoryClient,
   GatewayMemoryClientError,
+  createDifyWorkflowMemoryAdapter,
   createGatewayPlatformAdapter,
-} from "./src/adapters/gateway-client/index.js";
+} from "./src/adapters/index.js";
 export type {
+  DifyCaptureResult,
+  DifyGatewayMemoryPort,
+  DifyRecallResult,
+  DifyWorkflowInput,
+  DifyWorkflowMemoryAdapterOptions,
   GatewayMemoryClientOptions,
   GatewayPlatformAdapter,
   GatewayPlatformAdapterOptions,
   GatewayPlatformContext,
-} from "./src/adapters/gateway-client/index.js";
+} from "./src/adapters/index.js";
 
 const TAG = "[memory-tdai]";
 
