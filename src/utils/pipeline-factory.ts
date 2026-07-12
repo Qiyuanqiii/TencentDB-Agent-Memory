@@ -543,11 +543,10 @@ export function createL2Runner(opts: {
           `memories_since: ${preMemoriesSince} → ${postState.memories_since_last_persona}. ` +
           `Repairing...`,
         );
-        await checkpoint.write({
-          ...postState,
-          scenes_processed: Math.max(postState.scenes_processed, preScenesProcessed),
-          total_processed: Math.max(postState.total_processed, preTotalProcessed),
-          memories_since_last_persona: Math.max(postState.memories_since_last_persona, preMemoriesSince),
+        await checkpoint.repairRegressedCounters({
+          scenes_processed: preScenesProcessed,
+          total_processed: preTotalProcessed,
+          memories_since_last_persona: preMemoriesSince,
         });
         logger.info(`${TAG} [L2] Checkpoint repaired`);
       }

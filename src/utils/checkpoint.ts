@@ -293,6 +293,29 @@ export class CheckpointManager {
     return withFileLock(this.filePath, () => this.writeRaw(checkpoint));
   }
 
+  /**
+   * Atomically restore monotonic counters to a known-good lower bound.
+   *
+   * Unlike writing a previously-read checkpoint snapshot, this re-reads state
+   * inside the file lock and updates only the guarded counters. Concurrent L0
+   * or L1 progress that arrived after regression detection is preserved.
+   */
+  async repairRegressedCounters(
+    baseline: Pick<
+      Checkpoint,
+      "scenes_processed" | "total_processed" | "memories_since_last_persona"
+    >,
+  ): Promise<void> {
+    await this.mutate((cp) => {
+      cp.scenes_processed = Math.max(cp.scenes_processed, baseline.scenes_processed);
+      cp.total_processed = Math.max(cp.total_processed, baseline.total_processed);
+      cp.memories_since_last_persona = Math.max(
+        cp.memories_since_last_persona,
+        baseline.memories_since_last_persona,
+      );
+    });
+  }
+
   // ============================
   // Public API — mutating (all serialized via file lock)
   // ============================
