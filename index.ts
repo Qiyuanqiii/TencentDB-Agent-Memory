@@ -35,6 +35,11 @@ import { registerMemoryTdaiCli } from "./src/cli/index.js";
 import { initDataDirectories, resetStores } from "./src/utils/pipeline-factory.js";
 import { getOrCreateInstanceId, initReporter, report, resetReporter } from "./src/core/report/reporter.js";
 import { ensureL2L3Local } from "./src/core/profile/profile-sync.js";
+import {
+  SearchLimitTracker,
+  MAX_SEARCH_CALLS_PER_TURN,
+  SEARCH_LIMIT_EXCEEDED_MESSAGE,
+} from "./src/core/tools/search-limit-tracker.js";
 
 // Core abstractions (host-neutral)
 import { OpenClawHostAdapter } from "./src/adapters/openclaw/host-adapter.js";
@@ -92,6 +97,11 @@ const pendingRecallEndTimestamps = new Map<string, number>();
 let sharedMemoryCleaner: LocalMemoryCleaner | undefined;
 
 /**
+ * Per-turn search limit tracker across tdai_memory_search and tdai_conversation_search (方案 D).
+ */
+const searchLimitTracker = new SearchLimitTracker();
+
+/**
  * Sweep both pendingOriginalPrompts and pendingRecallCache for stale entries.
  * Unified from the original sweepStalePromptCache() to cover both Maps
  * with identical TTL + hard-cap logic.
@@ -127,6 +137,7 @@ function sweepStaleCaches(): void {
       pendingRecallCache.delete(key);
     }
   }
+  searchLimitTracker.sweep(PROMPT_CACHE_TTL_MS, PROMPT_CACHE_MAX_SIZE);
 }
 
 export default function register(api: OpenClawPluginApi) {
@@ -346,11 +357,9 @@ export default function register(api: OpenClawPluginApi) {
   // Tool registration — delegate to TdaiCore
   // ============================
 
-  // tdai_memory_search — Agent-callable L1 memory search tool
-  // TODO: implement hard per-turn call limit via before_tool_call hook + execute early-return (方案 D)
+  // tdai_memory_search — Agent-callable L1 memory search tool (with hard per-turn limit guard — 方案 D)
   if (cfg.recall.enabled || cfg.capture.enabled) {
-  api.registerTool(
-    {
+    const createMemorySearchTool = (toolContext) => ({
       name: "tdai_memory_search",
       label: "Memory Search",
       description:
@@ -379,12 +388,41 @@ export default function register(api: OpenClawPluginApi) {
         },
         required: ["query"],
       },
-      async execute(_toolCallId: string, params: Record<string, unknown>) {
+      async execute(_toolCallId: string, params: Record<string, unknown>, _signal?: AbortSignal) {
         const startMs = Date.now();
         const query = String(params.query ?? "");
         const limit = Math.min(Math.max(Number(params.limit) || 5, 1), 20);
         const typeFilter = typeof params.type === "string" ? params.type : undefined;
         const sceneFilter = typeof params.scene === "string" ? params.scene : undefined;
+        const boundSessionKey = resolveSessionKey(toolContext?.sessionKey);
+
+        // Hard per-turn call limit check (方案 D)
+        // 1. Check decision keyed by toolCallId (or pending session decision)
+        const decision = searchLimitTracker.consumeDecision(_toolCallId, boundSessionKey);
+        // 2. Direct fallback: if hook was bypassed, track and check with boundSessionKey
+        const fallbackDecision = !decision && boundSessionKey
+          ? searchLimitTracker.recordCall(boundSessionKey, _toolCallId)
+          : undefined;
+        const activeDecision = decision ?? fallbackDecision;
+
+        if (activeDecision && !activeDecision.allowed) {
+          const callCount = activeDecision.count;
+          api.logger.info(
+            `${TAG} [tool] tdai_memory_search call limit reached (${callCount}/${MAX_SEARCH_CALLS_PER_TURN}), early-returning without query`,
+          );
+          report("tool_call", {
+            tool: "tdai_memory_search",
+            query, limit, typeFilter, sceneFilter,
+            resultCount: 0,
+            strategy: "limit_exceeded",
+            durationMs: Date.now() - startMs,
+            success: true,
+          });
+          return {
+            content: [{ type: "text" as const, text: SEARCH_LIMIT_EXCEEDED_MESSAGE }],
+            details: { count: 0, strategy: "limit_exceeded", limitReached: true },
+          };
+        }
 
         api.logger.debug?.(
           `${TAG} [tool] tdai_memory_search called: ` +
@@ -430,14 +468,14 @@ export default function register(api: OpenClawPluginApi) {
           };
         }
       },
-    },
-    { name: "tdai_memory_search" },
-  );
+    });
 
-  // tdai_conversation_search — Agent-callable L0 conversation search tool
-  // TODO: implement hard per-turn call limit via before_tool_call hook + execute early-return (方案 D)
-  api.registerTool(
-    {
+    const memoryToolFactory = (toolContext) => createMemorySearchTool(toolContext);
+    Object.assign(memoryToolFactory, createMemorySearchTool());
+    api.registerTool(memoryToolFactory as any, { name: "tdai_memory_search" });
+
+    // tdai_conversation_search — Agent-callable L0 conversation search tool (with hard per-turn limit guard — 方案 D)
+    const createConversationSearchTool = (toolContext) => ({
       name: "tdai_conversation_search",
       label: "Conversation Search",
       description:
@@ -464,11 +502,39 @@ export default function register(api: OpenClawPluginApi) {
         },
         required: ["query"],
       },
-      async execute(_toolCallId: string, params: Record<string, unknown>) {
+      async execute(_toolCallId: string, params: Record<string, unknown>, _signal?: AbortSignal) {
         const startMs = Date.now();
         const query = String(params.query ?? "");
         const limit = Math.min(Math.max(Number(params.limit) || 5, 1), 20);
         const sessionKeyFilter = typeof params.session_key === "string" ? params.session_key : undefined;
+        const boundSessionKey = resolveSessionKey(toolContext?.sessionKey);
+        const effectiveSessionKey = boundSessionKey ?? sessionKeyFilter;
+
+        // Hard per-turn call limit check (方案 D)
+        const decision = searchLimitTracker.consumeDecision(_toolCallId, effectiveSessionKey);
+        const fallbackDecision = !decision && effectiveSessionKey
+          ? searchLimitTracker.recordCall(effectiveSessionKey, _toolCallId)
+          : undefined;
+        const activeDecision = decision ?? fallbackDecision;
+
+        if (activeDecision && !activeDecision.allowed) {
+          const callCount = activeDecision.count;
+          api.logger.info(
+            `${TAG} [tool] tdai_conversation_search call limit reached (${callCount}/${MAX_SEARCH_CALLS_PER_TURN}), early-returning without query`,
+          );
+          report("tool_call", {
+            tool: "tdai_conversation_search",
+            query, limit, sessionKeyFilter,
+            resultCount: 0,
+            durationMs: Date.now() - startMs,
+            strategy: "limit_exceeded",
+            success: true,
+          });
+          return {
+            content: [{ type: "text" as const, text: SEARCH_LIMIT_EXCEEDED_MESSAGE }],
+            details: { count: 0, strategy: "limit_exceeded", limitReached: true },
+          };
+        }
 
         api.logger.debug?.(
           `${TAG} [tool] tdai_conversation_search called: ` +
@@ -512,9 +578,49 @@ export default function register(api: OpenClawPluginApi) {
           };
         }
       },
-    },
-    { name: "tdai_conversation_search" },
-  );
+    });
+
+    const convToolFactory = (toolContext) => createConversationSearchTool(toolContext);
+    Object.assign(convToolFactory, createConversationSearchTool());
+    api.registerTool(convToolFactory as any, { name: "tdai_conversation_search" });
+
+    // ============================
+    // Lifecycle hooks — Search limit lifecycle (方案 D, decoupled from recall/capture flags)
+    // ============================
+    api.logger.debug?.(`${TAG} Registering search limit lifecycle hooks (before_tool_call, before_prompt_build, agent_end)`);
+
+    api.on("before_tool_call", (event: any, ctx: any) => {
+      const toolName = event?.toolName;
+      if (toolName !== "tdai_memory_search" && toolName !== "tdai_conversation_search") {
+        return;
+      }
+
+      const toolCallId = event?.toolCallId ?? ctx?.toolCallId;
+      const sessionKey = resolveSessionKey(ctx?.sessionKey) ?? resolveSessionKey(ctx?.sessionId);
+
+      const decision = searchLimitTracker.recordCall(sessionKey, toolCallId);
+
+      if (!decision.allowed) {
+        api.logger.warn(
+          `${TAG} [before_tool_call] Search limit exceeded for session=${sessionKey ?? "unknown"} ` +
+          `(${decision.count}/${MAX_SEARCH_CALLS_PER_TURN}), toolCallId=${toolCallId}, tool=${toolName}`,
+        );
+      }
+    });
+
+    api.on("before_prompt_build", (_event: any, ctx: any) => {
+      const sessionKey = resolveSessionKey(ctx?.sessionKey) ?? resolveSessionKey(ctx?.sessionId);
+      if (sessionKey) {
+        searchLimitTracker.resetTurn(sessionKey);
+      }
+    });
+
+    api.on("agent_end", (_event: any, ctx: any) => {
+      const sessionKey = resolveSessionKey(ctx?.sessionKey) ?? resolveSessionKey(ctx?.sessionId);
+      if (sessionKey) {
+        searchLimitTracker.clearSession(sessionKey);
+      }
+    });
   } else {
     api.logger.debug?.(`${TAG} Memory tools (tdai_memory_search, tdai_conversation_search) not registered — memory features disabled`);
   }
